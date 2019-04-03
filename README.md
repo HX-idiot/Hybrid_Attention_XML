@@ -9,5 +9,5 @@ pytorch implement for paper [Label-aware Document Representation via Hybrid Atte
 
 ### Train the model
 
-Source code will published after reviewing, to be continue...
+Source code will publish after reviewing, to be continue...
 
