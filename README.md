@@ -9,5 +9,6 @@ pytorch implement for paper [Label-aware Document Representation via Hybrid Atte
 
 ### Train the model
 
-run hybrid_xml.py.
+run `hybrid_xml.py`.
+
 
