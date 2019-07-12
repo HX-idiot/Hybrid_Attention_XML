@@ -6,11 +6,15 @@
 
 import os
 import argparse
+import math
 import numpy as np
 import timeit
 import data_helpers
 import torch
 import torch.utils.data as data_utils
+import torch.nn as nn
+import torch.nn.functional as F
+from tqdm import tqdm
 
 
 # In[3]:
@@ -37,7 +41,7 @@ def load_data(data_path,max_length,vocab_size,batch_size=64):
 data_path='/data/rcv1_raw_text.p'
 sequence_length=500
 vocab_size=30000
-batch_size=32
+batch_size=64
 
 
 # In[5]:
@@ -46,7 +50,7 @@ batch_size=32
 
 print('-'*50)
 print('Loading data...'); start_time = timeit.default_timer()
-train_loader, test_loader,vocabulary, X_tst, Y_tst, X_trn,Y_trn ,catgy= load_data(data_path,sequence_length,vocab_size,batch_size)
+train_loader, test_loader,vocabulary, X_tst, Y_tst, X_trn,Y_trn= load_data(data_path,sequence_length,vocab_size,batch_size)
 print('Process time %.3f (secs)\n' % (timeit.default_timer() - start_time))
 
 
@@ -85,14 +89,6 @@ if pretrain=='glove':
 
 
 #create Network structure
-import math
-import torch.nn as nn
-import torch.nn.functional as F
-from tqdm import tqdm
-
-
-# In[8]:
-
 
 class BasicModule(nn.Module):
     def __init__(self):
@@ -120,8 +116,8 @@ def get_embedding_layer(embedding_weights):
         
 class hybrid_xml(BasicModule):
     def __init__(self,num_labels=103,vocab_size=30001,embedding_size=300,embedding_weights=None,
-                max_seq=500,hidden_size=256,d_a=256,batch_size=batch_size):
-        super(deepwalk_xml,self).__init__()
+                max_seq=500,hidden_size=256,d_a=256):
+        super(hybrid_xml,self).__init__()
         self.embedding_size=embedding_size
         self.num_labels=num_labels
         self.max_seq=max_seq
@@ -151,17 +147,17 @@ class hybrid_xml(BasicModule):
         self.linear_final = torch.nn.Linear(512,256)
         self.output_layer=torch.nn.Linear(256,1)
 
-    def init_hidden(self):
+    def init_hidden(self,batch_size):
         if torch.cuda.is_available():
-            return (torch.zeros(2,self.batch_size,self.hidden_size).cuda(),torch.zeros(2,self.batch_size,self.hidden_size).cuda())
+            return (torch.zeros(2,batch_size,self.hidden_size).cuda(),torch.zeros(2,batch_size,self.hidden_size).cuda())
         else:
-            return (torch.zeros(2,self.batch_size,self.hidden_size),torch.zeros(2,self.batch_size,self.hidden_size))
+            return (torch.zeros(2,batch_size,self.hidden_size),torch.zeros(2,batch_size,self.hidden_size))
                 
     def forward(self,x,label_emb):
         emb=self.word_embeddings(x)
         emb=self.embedding_dropout(emb)#[batch,seq_len,embeddim_dim]
 
-        hidden_state=self.init_hidden()
+        hidden_state=self.init_hidden(emb.size(0))
         output,hidden_state=self.lstm(emb,hidden_state)#[batch,seq,2*hidden]
         
         #get attn_key
@@ -199,8 +195,7 @@ class hybrid_xml(BasicModule):
         out=F.relu(self.linear_final(out),inplace=True)
         out=torch.sigmoid(self.output_layer(out).squeeze(-1))#[batch,L]
 
-#         return out
-        return out,factor1
+        return out
 
 
 # In[10]:
@@ -245,7 +240,7 @@ if use_cuda:
 
 
 model=hybrid_xml(num_labels=103,vocab_size=30001,embedding_size=300,embedding_weights=embedding_weights,
-                max_seq=500,hidden_size=256,d_a=256,batch_size=batch_size)
+                max_seq=500,hidden_size=256,d_a=256)
 # model.load('./rcv_log/rcv_9.pth')
 if use_cuda:
     model.cuda()
@@ -274,143 +269,120 @@ for i in params:
 print("total sum of parameters：" + str(k))
 
 
-# In[17]:
-
-def precision_k(true_mat, score_mat, k):
-    p = np.zeros((k, 1))
-    rank_mat = np.argsort(score_mat)
-    backup = np.copy(score_mat)
-    for k in range(k):
-        score_mat = np.copy(backup)
-        for i in range(rank_mat.shape[0]):
-            score_mat[i][rank_mat[i, :-(k + 1)]] = 0
-        score_mat = np.ceil(score_mat)
-        #         kk = np.argwhere(score_mat>0)
-        mat = np.multiply(score_mat, true_mat)
-        #         print("mat",mat)
-        num = np.sum(mat, axis=1)
-        p[k] = np.mean(num / (k + 1))
-    return np.around(p, decimals=4)
-
-def get_factor(label_count,k):
-    res=[]
-    for i in range(len(label_count)):
-        n=int(min(label_count[i],k))
-        f=0.0
-        for j in range(1,n+1):
-            f+=1/np.log2(j+1)
-        res.append(f)
-    return np.array(res)
-        
-
-def Ndcg_k(true_mat,score_mat,k):
-    res=np.zeros((k,1))
-    rank_mat=np.argsort(score_mat)
-    backup=np.copy(score_mat)
-    label_count=np.sum(true_mat,axis=1)
+def precision_k(pred, label, k=[1, 3, 5]):
+    batch_size = pred.shape[0]
     
-    for m in range(k):
-        y_mat=np.copy(true_mat)
-        for i in range(rank_mat.shape[0]):
-            y_mat[i][rank_mat[i, :-(m + 1)]] = 0
-            for j in range(m+1):
-                y_mat[i][rank_mat[i,-(j+1)]] /= np.log2(j+1+1)
-        
-        dcg=np.sum(y_mat,axis=1)
-        factor=get_factor(label_count,m+1)
-        ndcg=np.mean(dcg/factor)
-        res[m]=ndcg
-    return np.around(res, decimals=4)
+    precision = []
+    for _k in k:
+        p = 0
+        for i in range(batch_size):
+            p += label[i, pred[i, :_k]].mean()
+        precision.append(p*100/batch_size)
+    
+    return precision
+
+def ndcg_k(pred, label, k=[1, 3, 5]):
+    batch_size = pred.shape[0]
+    
+    ndcg = []
+    for _k in k:
+        score = 0
+        rank = np.log2(np.arange(2, 2 + _k))
+        for i in range(batch_size):
+            l = label[i, pred[i, :_k]]
+            n = l.sum()
+            if(n == 0):
+                continue
+            
+            dcg = (l/rank).sum()
+            label_count = label[i].sum()
+            norm = 1 / np.log2(np.arange(2, 2 + np.min((_k, label_count))))
+            norm = norm.sum()
+            score += dcg/norm
+            
+        ndcg.append(score*100/batch_size)
+    
+    return ndcg
 
 
-# In[18]:
-
-
-optimizer=torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=0.001,weight_decay=1e-5)
-criterion=torch.nn.BCELoss(size_average=False)
+optimizer=torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=0.001,weight_decay=4e-5)
+criterion=torch.nn.BCELoss(reduction='sum')
 epoch=15
+best_acc=0.0
+pre_acc=0.0
+
+label_emb=label_emb.cuda()
 
 # if not os.path.isdir('./rcv_log'):
 #     os.makedirs('./rcv_log')
 # trace_file='./rcv_log/trace_rcv.txt'
 
-for ep in range(1,epoch+1):
-    train_loss=[]
-    prec_k=[]
-    ndcg_k=[]
+for ep in range(1,epoch+1): 
+    train_loss=0
     print("----epoch: %2d---- "%ep)
     model.train()
-    optimizer.zero_grad()
     for i,(data,labels) in enumerate(tqdm(train_loader)):
-#         optimizer.zero_grad()
-        if use_cuda:
-            data=data.cuda()
-            labels=labels.cuda()
-            label_emb=label_emb.cuda()
+        optimizer.zero_grad()
         
-#         pred,reg=model(data,label_emb)
-        pred,factor=model(data,label_emb)
-        loss_pred=criterion(pred,labels.float())/batch_size
-
-        loss_pred.backward()
-#         optimizer.step()
-        if (i+1)%4==0:
-            optimizer.step()
-            optimizer.zero_grad()
-        #calculate prec@1~5
-        labels_cpu=labels.data.cpu().float()
-        pred_cpu=pred.data.cpu()
-        prec=precision_k(labels_cpu.numpy(),pred_cpu.numpy(),5)
-        prec_k.append(prec)
+        data=data.cuda()
+        labels=labels.cuda()
         
-        ndcg=Ndcg_k(labels_cpu.numpy(),pred_cpu.numpy(),5)
-        ndcg_k.append(ndcg)
+        pred=model(data,label_emb)
+        loss=criterion(pred,labels.float())/pred.size(0)
+        loss.backward()
+        optimizer.step()
 
-        train_loss.append(float(loss_pred))
-    avg_loss=np.mean(train_loss)
-    epoch_prec=np.array(prec_k).mean(axis=0)
-    epoch_ndcg=np.array(ndcg_k).mean(axis=0)
+        train_loss+=float(loss)
+    batch_num=i+1
+    train_loss/=batch_num
     
-    print("epoch %2d training end : avg_loss = %.4f"%(ep,avg_loss))
-    print("precision@1 : %.4f , precision@3 : %.4f , precision@5 : %.4f "%(epoch_prec[0],epoch_prec[2],epoch_prec[4]))
-    print("ndcg@1 : %.4f , ndcg@3 : %.4f , ndcg@5 : %.4f "%(epoch_ndcg[0],epoch_ndcg[2],epoch_ndcg[4]))
-#     with open(trace_file,'a') as f:
-#         f.write('epoch:{:2d} training end：loss:{:.4f} , p@1:{:.4f} , p@3:{:.4f}, p@5:{:.4f},     ndcg@1:{:.4f}, ndcg@3:{:.4f}, ndcg@5:{:.4f}'.format(ep,avg_loss,float(epoch_prec[0]),float(epoch_prec[2]),float(epoch_prec[4]),float(epoch_ndcg[0]),float(epoch_ndcg[2]),float(epoch_ndcg[4])))
-#         f.write('\n')
-    # if ep>6:
-    print("begin validation")
-    test_loss=[]
-    test_acc_k=[]
-    test_ndcg_k=[]
+    print("epoch %2d 训练结束 : avg_loss = %.4f"%(ep,train_loss))
+#     if ep%2==0:
+    print("开始进行validation")
+    test_loss=0
+    test_p1, test_p3, test_p5 = 0, 0, 0
+    test_ndcg1, test_ndcg3, test_ndcg5=0, 0, 0
     model.eval()
-    for (data,labels) in tqdm(test_loader):
-        if use_cuda:
-            data=data.cuda()
-            labels=labels.cuda()
-            label_emb=label_emb.cuda()
+    for i,(data,labels) in enumerate(tqdm(test_loader)):
+        
+        data=data.cuda()
+        labels=labels.cuda()
+        pred=model(data,label_emb)
+        loss=criterion(pred,labels.float())/pred.size(0)
 
-        pred,factor=model(data,label_emb)
-        loss_pred=criterion(pred,labels.float())/batch_size
-
-        #calculate prec@1~5
-        labels_cpu=labels.data.cpu().float()
+        #计算metric
+        labels_cpu=labels.data.cpu()
         pred_cpu=pred.data.cpu()
-        prec=precision_k(labels_cpu.numpy(),pred_cpu.numpy(),5)
-        test_acc_k.append(prec)
 
-        ndcg=Ndcg_k(labels_cpu.numpy(),pred_cpu.numpy(),5)
-        test_ndcg_k.append(ndcg)
+        _p1,_p3,_p5=precision_k(pred_cpu.topk(k=5)[1].numpy(), labels_cpu.numpy(), k=[1,3,5])
+        test_p1+=_p1
+        test_p3+=_p3
+        test_p5+=_p5
 
-        test_loss.append(float(loss_pred))
-    avg_test_loss=np.mean(test_loss)
-    test_prec=np.array(test_acc_k).mean(axis=0)
-    test_ndcg=np.array(test_ndcg_k).mean(axis=0)
-    print("epoch %2d testing end : avg_loss = %.4f"%(ep,avg_test_loss))
-    print("precision@1 : %.4f , precision@3 : %.4f , precision@5 : %.4f "%(test_prec[0],test_prec[2],test_prec[4]))
-    print("ndcg@1 : %.4f , ndcg@3 : %.4f , ndcg@5 : %.4f "%(test_ndcg[0],test_ndcg[2],test_ndcg[4]))
-#     with open(trace_file,'a') as f:
-#         f.write('epoch:{:2d} testing end：loss:{:.4f} , p@1:{:.4f} , p@3:{:.4f}, p@5:{:.4f},     ndcg@1:{:.4f}, ndcg@3:{:.4f}, ndcg@5:{:.4f}'.format(ep,avg_test_loss,float(test_prec[0]),float(test_prec[2]),float(test_prec[4]),float(test_ndcg[0]),float(test_ndcg[2]),float(test_ndcg[4])))
-#         f.write('\n')
-    # p='./rcv_log/rcv_%d.pth'%ep
-    # name=model.save(path=p)
-    # print("model save successfully!",name)
+
+        _ndcg1,_ndcg3,_ndcg5=ndcg_k(pred_cpu.topk(k=5)[1].numpy(), labels_cpu.numpy(), k=[1,3,5])
+        test_ndcg1+=_ndcg1
+        test_ndcg3+=_ndcg3
+        test_ndcg5+=_ndcg5
+
+        test_loss+=float(loss)
+    batch_num=i+1
+    test_loss/=batch_num
+
+    test_p1/=batch_num
+    test_p3/=batch_num
+    test_p5/=batch_num
+
+    test_ndcg1/=batch_num
+    test_ndcg3/=batch_num
+    test_ndcg5/=batch_num
+
+    print("epoch %2d 测试结束 : avg_loss = %.4f"%(ep,test_loss))
+    print("precision@1 : %.4f , precision@3 : %.4f , precision@5 : %.4f "%(test_p1,test_p3,test_p5))
+    print("ndcg@1 : %.4f , ndcg@3 : %.4f , ndcg@5 : %.4f "%(test_ndcg1,test_ndcg3,test_ndcg5))
+
+
+    if test_p1<pre_acc:
+        for param_group in optimizer.param_groups:
+            param_group['lr']=0.0001
+    pre_acc=test_p1
