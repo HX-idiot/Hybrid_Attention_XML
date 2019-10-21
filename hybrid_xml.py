@@ -114,38 +114,43 @@ def get_embedding_layer(embedding_weights):
     word_embeddings.weight.requires_grad=False #not train
     return word_embeddings
         
-class hybrid_xml(BasicModule):
-    def __init__(self,num_labels=103,vocab_size=30001,embedding_size=300,embedding_weights=None,
-                max_seq=500,hidden_size=256,d_a=256):
-        super(hybrid_xml,self).__init__()
+class Hybrid_XML(BasicModule):
+    def __init__(self,num_labels=3714,vocab_size=30001,embedding_size=300,embedding_weights=None,
+                max_seq=300,hidden_size=256,d_a=256,label_emb=None):
+        super(Hybrid_XML,self).__init__()
         self.embedding_size=embedding_size
         self.num_labels=num_labels
         self.max_seq=max_seq
         self.hidden_size=hidden_size
-        self.batch_size=batch_size
+        
         if embedding_weights is None:
             self.word_embeddings=nn.Embedding(vocab_size,embedding_size)
         else:
             self.word_embeddings=get_embedding_layer(embedding_weights)
-            
-        self.embedding_dropout=nn.Dropout(p=0.25,inplace=True)
+
         self.lstm=nn.LSTM(input_size=self.embedding_size,hidden_size=self.hidden_size,num_layers=1,batch_first=True,bidirectional=True)
         
-        #interaction-attn layer
+        #interaction-attention layer
         self.key_layer = torch.nn.Linear(2*self.hidden_size,self.hidden_size)
         self.query_layer=torch.nn.Linear(self.hidden_size,self.hidden_size)
         
         #self-attn layer
         self.linear_first = torch.nn.Linear(2*self.hidden_size,d_a)
         self.linear_second = torch.nn.Linear(d_a,self.num_labels)
-        
-        #weight adaptive layer
-        self.linear_weight1=torch.nn.Linear(2*self.hidden_size,1)
-        self.linear_weight2=torch.nn.Linear(2*self.hidden_size,1)
 
-        #prediction layer
-        self.linear_final = torch.nn.Linear(512,256)
-        self.output_layer=torch.nn.Linear(256,1)
+        #weight adaptive layer
+        self.linear_weight=torch.nn.Linear(2*self.hidden_size,1)
+        
+        #shared for all attention component
+        self.linear_final = torch.nn.Linear(2*self.hidden_size,self.hidden_size)
+        self.output_layer=torch.nn.Linear(self.hidden_size,1)
+        
+        label_embedding=torch.FloatTensor(self.num_labels,self.hidden_size)
+        if label_emb is None:
+            nn.init.xavier_normal_(label_embedding)
+        else:
+            label_embedding.copy_(label_emb)
+        self.label_embedding=nn.Parameter(label_embedding,requires_grad=False)
 
     def init_hidden(self,batch_size):
         if torch.cuda.is_available():
@@ -153,18 +158,19 @@ class hybrid_xml(BasicModule):
         else:
             return (torch.zeros(2,batch_size,self.hidden_size),torch.zeros(2,batch_size,self.hidden_size))
                 
-    def forward(self,x,label_emb):
+    def forward(self,x):
+       
         emb=self.word_embeddings(x)
-        emb=self.embedding_dropout(emb)#[batch,seq_len,embeddim_dim]
-
+        
         hidden_state=self.init_hidden(emb.size(0))
         output,hidden_state=self.lstm(emb,hidden_state)#[batch,seq,2*hidden]
         
+
         #get attn_key
         attn_key=self.key_layer(output) #[batch,seq,hidden]
         attn_key=attn_key.transpose(1,2)#[batch,hidden,seq]
         #get attn_query
-        label_emb=label_emb.expand((attn_key.size(0),label_emb.size(0),label_emb.size(1)))#[batch,L,label_emb]
+        label_emb=self.label_embedding.expand((attn_key.size(0),self.label_embedding.size(0),self.label_embedding.size(1)))#[batch,L,label_emb]
         label_emb=self.query_layer(label_emb)#[batch,L,label_emb]
         
         #attention
@@ -178,21 +184,16 @@ class hybrid_xml(BasicModule):
         self_attn=self.linear_second(self_attn) #[batch,seq,L]
         self_attn=F.softmax(self_attn,dim=1)
         self_attn=self_attn.transpose(1,2)#[batch,L,seq]
-        out2=torch.bmm(self_attn,output)#[batch,L,2*hidden]
-        
-        #normalize
-        out1=F.normalize(out1,p=2,dim=-1)
-        out2=F.normalize(out2,p=2,dim=-1)
+        out2=torch.bmm(self_attn,output)#[batch,L,hidden]
 
-        factor1=torch.sigmoid(self.linear_weight1(out1))
-        factor2=torch.sigmoid(self.linear_weight2(out2))
+
+        factor1=torch.sigmoid(self.linear_weight(out1))
         
-        factor1=factor1/(factor1+factor2)
         factor2=1-factor1
         
         out=factor1*out1+factor2*out2
         
-        out=F.relu(self.linear_final(out),inplace=True)
+        out=F.relu(self.linear_final(out))
         out=torch.sigmoid(self.output_layer(out).squeeze(-1))#[batch,L]
 
         return out
@@ -240,7 +241,7 @@ if use_cuda:
 
 
 model=hybrid_xml(num_labels=103,vocab_size=30001,embedding_size=300,embedding_weights=embedding_weights,
-                max_seq=500,hidden_size=256,d_a=256)
+                max_seq=500,hidden_size=256,d_a=256,label_emb=label_emb)
 # model.load('./rcv_log/rcv_9.pth')
 if use_cuda:
     model.cuda()
@@ -311,7 +312,6 @@ epoch=15
 best_acc=0.0
 pre_acc=0.0
 
-label_emb=label_emb.cuda()
 
 # if not os.path.isdir('./rcv_log'):
 #     os.makedirs('./rcv_log')
@@ -337,7 +337,6 @@ for ep in range(1,epoch+1):
     train_loss/=batch_num
     
     print("epoch %2d 训练结束 : avg_loss = %.4f"%(ep,train_loss))
-#     if ep%2==0:
     print("开始进行validation")
     test_loss=0
     test_p1, test_p3, test_p5 = 0, 0, 0
@@ -382,7 +381,7 @@ for ep in range(1,epoch+1):
     print("ndcg@1 : %.4f , ndcg@3 : %.4f , ndcg@5 : %.4f "%(test_ndcg1,test_ndcg3,test_ndcg5))
 
 
-    if test_p1<pre_acc:
+    if test_p3<pre_acc:
         for param_group in optimizer.param_groups:
             param_group['lr']=0.0001
-    pre_acc=test_p1
+    pre_acc=test_p3
