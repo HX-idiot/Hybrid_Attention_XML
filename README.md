@@ -4,7 +4,7 @@ pytorch implement for paper [Label-aware Document Representation via Hybrid Atte
 
 ### Set up the  dataset
 
- download the dataset and Glove embedding from [here](https://drive.google.com/drive/folders/1KQMBZgACUm-ZZcSrQpDPlB6CFKvf9Gfb).
+ download the dataset and Glove embedding from [here](https://drive.google.com/open?id=1ONmD-kYBHIiwJYRDMFKZy2g5-ZQwIwF7).
 
 ### Train the model
 
