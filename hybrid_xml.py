@@ -29,8 +29,8 @@ def load_data(data_path,max_length,vocab_size,batch_size=64):
 
     train_data = data_utils.TensorDataset(torch.from_numpy( X_trn).type(torch.LongTensor),torch.from_numpy( Y_trn).type(torch.LongTensor))
     test_data = data_utils.TensorDataset(torch.from_numpy(X_tst).type(torch.LongTensor),torch.from_numpy(Y_tst).type(torch.LongTensor))
-    train_loader = data_utils.DataLoader(train_data, batch_size, drop_last=True)
-    test_loader = data_utils.DataLoader(test_data, batch_size, drop_last=True)
+    train_loader = data_utils.DataLoader(train_data, batch_size, drop_last=False, shuffle=True)
+    test_loader = data_utils.DataLoader(test_data, batch_size, drop_last=False)
     return train_loader, test_loader,vocabulary, X_tst, Y_tst, X_trn,Y_trn
 
 
@@ -139,7 +139,8 @@ class Hybrid_XML(BasicModule):
         self.linear_second = torch.nn.Linear(d_a,self.num_labels)
 
         #weight adaptive layer
-        self.linear_weight=torch.nn.Linear(2*self.hidden_size,1)
+        self.linear_weight1=torch.nn.Linear(2*self.hidden_size,1)
+        self.linear_weight2=torch.nn.Linear(2*self.hidden_size,1)
         
         #shared for all attention component
         self.linear_final = torch.nn.Linear(2*self.hidden_size,self.hidden_size)
@@ -187,8 +188,9 @@ class Hybrid_XML(BasicModule):
         out2=torch.bmm(self_attn,output)#[batch,L,hidden]
 
 
-        factor1=torch.sigmoid(self.linear_weight(out1))
-        
+        factor1=torch.sigmoid(self.linear_weight1(out1))
+        factor2=torch.sigmoid(self.linear_weight2(out2))
+        factor1=factor1/(factor1+factor2)
         factor2=1-factor1
         
         out=factor1*out1+factor2*out2
