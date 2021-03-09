@@ -242,7 +242,7 @@ if use_cuda:
 # In[14]:
 
 
-model=hybrid_xml(num_labels=103,vocab_size=30001,embedding_size=300,embedding_weights=embedding_weights,
+model=Hybrid_XML(num_labels=103,vocab_size=30001,embedding_size=300,embedding_weights=embedding_weights,
                 max_seq=500,hidden_size=256,d_a=256,label_emb=label_emb)
 # model.load('./rcv_log/rcv_9.pth')
 if use_cuda:
@@ -329,7 +329,7 @@ for ep in range(1,epoch+1):
         data=data.cuda()
         labels=labels.cuda()
         
-        pred=model(data,label_emb)
+        pred=model(data)
         loss=criterion(pred,labels.float())/pred.size(0)
         loss.backward()
         optimizer.step()
@@ -348,7 +348,7 @@ for ep in range(1,epoch+1):
         
         data=data.cuda()
         labels=labels.cuda()
-        pred=model(data,label_emb)
+        pred=model(data)
         loss=criterion(pred,labels.float())/pred.size(0)
 
         #计算metric
